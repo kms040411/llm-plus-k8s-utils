@@ -1,0 +1,50 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- uv (keep uv.lock tracked) ---
+.uv/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- Secrets / local config (never commit a real api_key or server IP) ---
+# config.json holds real values; copy it from config.example.json (tracked).
+config.json
+.env
+.env.*
+!.env.example
+
+# --- Generated session logs ---
+outputs/
+*.log
+
+# --- Kubernetes (local config often holds tokens/secrets) ---
+kubeconfig
+*.kubeconfig
+
+# --- Editors / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db

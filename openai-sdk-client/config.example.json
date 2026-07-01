@@ -1,0 +1,5 @@
+{
+  "base_url": "http://YOUR_SERVER_IP:PORT/v1",
+  "api_key": "sk-your-api-key-here",
+  "model": "prunus"
+}
