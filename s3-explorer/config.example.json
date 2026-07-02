@@ -1,0 +1,18 @@
+{
+  "endpoint_url": "http://minio.local:9000",
+  "region": "us-east-1",
+  "access_key_id": "YOUR_ACCESS_KEY",
+  "secret_access_key": "YOUR_SECRET_KEY",
+  "session_token": null,
+  "bucket": "my-bucket",
+  "addressing_style": "path",
+  "verify_ssl": true,
+  "ca_bundle": null,
+  "signature_version": "s3v4",
+  "request_checksum_calculation": "when_required",
+  "response_checksum_validation": "when_required",
+  "connect_timeout": 10,
+  "read_timeout": 60,
+  "max_attempts": 3,
+  "max_keys_default": 1000
+}

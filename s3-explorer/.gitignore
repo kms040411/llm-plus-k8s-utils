@@ -1,0 +1,6 @@
+# Real credentials — copy config.example.json to config.json and fill it in.
+# (The repo root .gitignore only covers .env*, not config.json.)
+config.json
+
+# Session logs (also covered by the repo-root .gitignore).
+outputs/
