@@ -19,9 +19,10 @@ uv sync                              # installs openai (uv manages Python too)
 cp config.example.json config.json   # then edit base_url / api_key
 ```
 
-`config.json` holds the connection settings (`base_url`, `api_key`, `model`) and
-is **git-ignored** — this is a public repo, so a real IP or key must never be
-committed. Values resolve as **CLI flag > env var > config.json > fallback**.
+`config.json` holds the connection settings (`base_url`, `api_key`, `model`) plus
+optional tool settings (`agent`, `tools`, `tool_choice`), and is **git-ignored** —
+this is a public repo, so a real IP or key must never be committed. Values resolve
+as **CLI flag > config.json > fallback** (connection settings also check env vars).
 
 ## Usage
 
@@ -55,9 +56,9 @@ env vars, so a stray `STORE=` / `AGENT_MODE=` in your shell can't change anythin
 | `--base-url` | *(config.json, else `http://localhost:8000/v1`)* | OpenAI-compatible root (SDK appends the path) |
 | `--api-key` | *(config.json, else `EMPTY`)* | bearer token |
 | `--stream` / `--no-stream` | stream | SSE streaming vs one-shot |
-| `--agent` / `--no-agent` | chat **on**, responses **off** | send `X-Agent-Mode` + default tools to server-side `code_execution` (see below) |
-| `--tools` | mode default | JSON array overriding the tools, e.g. `'[]'` |
-| `--tool-choice` | `auto` | tool_choice |
+| `--agent` / `--no-agent` | *(config.json, else chat **on** / responses **off**)* | send `X-Agent-Mode` + default tools to server-side `code_execution` (see below) |
+| `--tools` | *(config.json, else mode default)* | JSON array overriding the tools, e.g. `'[]'` |
+| `--tool-choice` | *(config.json, else `auto`)* | tool_choice |
 | `--store` / `--no-store` | store | *(test_response.py)* server-side state via `previous_response_id` vs stateless local input |
 | `--raw` | off | *(test_chat.py)* dump the unparsed HTTP response (see below) |
 
@@ -65,6 +66,15 @@ env vars, so a stray `STORE=` / `AGENT_MODE=` in your shell can't change anythin
 / `API_KEY` env var > `config.json` > built-in fallback**. The config file is
 `config.json` beside the scripts (override the path with `CONFIG_FILE`); copy it
 from `config.example.json`. Logs still honor `OUTPUT_DIR` / `OUTPUT_FILE`.
+
+The tool settings `--agent` / `--tools` / `--tool-choice` resolve as **CLI flag >
+`config.json` > built-in default** (no env var). In `config.json`, `agent` is a
+bool, `tools` a JSON array of tool objects (e.g. `[{"type": "web_search"}, {"type":
+"web_fetch"}]`; bare strings are accepted as shorthand, so `["web_search"]` ==
+`[{"type": "web_search"}]`), and `tool_choice` a string; a `null` or omitted value
+means "unset — use the default". So, for
+example, `"tools": []` there disables the default `code_execution` tool for every
+run, and `"tool_choice": "required"` forces a tool call.
 
 ## System prompt
 

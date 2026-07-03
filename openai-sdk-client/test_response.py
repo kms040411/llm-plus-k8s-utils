@@ -221,7 +221,7 @@ def main() -> int:
         description="Standard OpenAI Responses API test client (prunus dev server).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    common.add_common_args(p, default_agent=False)
+    common.add_common_args(p)
     p.add_argument(
         "--store", action=argparse.BooleanOptionalAction, default=True,
         help="server-side state (store=true + previous_response_id chaining); "
@@ -230,13 +230,10 @@ def main() -> int:
     args = p.parse_args()
 
     common.configure(args)
-    AGENT_MODE = args.agent
+    AGENT_MODE = common.resolve_agent(args, default=False)
     STORE = args.store
-    TOOL_CHOICE = args.tool_choice
-    TOOLS = (
-        json.loads(args.tools) if args.tools is not None
-        else ([{"type": "code_execution"}] if AGENT_MODE else [])
-    )
+    TOOL_CHOICE = common.resolve_tool_choice(args)
+    TOOLS = common.resolve_tools(args, AGENT_MODE)
     client = common.make_client(AGENT_MODE)
 
     common.install_logfile("response")

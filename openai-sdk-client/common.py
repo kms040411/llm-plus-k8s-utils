@@ -105,10 +105,12 @@ def make_client(agent_mode: bool = False) -> OpenAI:
     return OpenAI(base_url=BASE_URL, api_key=API_KEY, default_headers=headers)
 
 
-def add_common_args(parser: argparse.ArgumentParser, *, default_agent: bool) -> None:
-    """Add the CLI arguments shared by both clients. Connection settings fall
-    back to env vars as their defaults; behavior toggles use explicit hardcoded
-    defaults so a bare run is predictable with no hidden env state."""
+def add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Add the CLI arguments shared by both clients. Connection settings fall back
+    to env var / config.json as their defaults. The tool-related toggles (--agent,
+    --tools, --tool-choice) default to None here so that "unset on the CLI" is
+    distinguishable from an explicit value; each script then resolves them via
+    common.resolve_* with precedence CLI > config.json > built-in default."""
     parser.add_argument("prompt", nargs="?",
                         help="single prompt (one-shot); omit for the interactive REPL")
     parser.add_argument("--model", default=MODEL, help="model id")
@@ -116,11 +118,13 @@ def add_common_args(parser: argparse.ArgumentParser, *, default_agent: bool) -> 
     parser.add_argument("--api-key", default=API_KEY, help="bearer token")
     parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True,
                         help="stream the response over SSE")
-    parser.add_argument("--agent", action=argparse.BooleanOptionalAction, default=default_agent,
-                        help="send X-Agent-Mode and default tools to server-side code_execution")
+    parser.add_argument("--agent", action=argparse.BooleanOptionalAction, default=None,
+                        help="send X-Agent-Mode and default tools to server-side code_execution "
+                             "(default: config 'agent', else the per-client default)")
     parser.add_argument("--tools", default=None,
-                        help="JSON array of tools (overrides the mode default), e.g. '[]'")
-    parser.add_argument("--tool-choice", default="auto", help="tool_choice")
+                        help="JSON array of tools; overrides config 'tools' and the mode default, e.g. '[]'")
+    parser.add_argument("--tool-choice", default=None,
+                        help="tool_choice (default: config 'tool_choice', else 'auto')")
 
 
 def configure(args: argparse.Namespace) -> None:
@@ -131,6 +135,40 @@ def configure(args: argparse.Namespace) -> None:
     STREAM = args.stream
     BASE_URL = args.base_url
     API_KEY = args.api_key
+
+
+# --- tool settings: CLI > config.json > built-in default ----------------------
+# Like the connection settings, the tool config resolves with the CLI winning over
+# config.json (a null/absent config value means "unset — use the default").
+def resolve_agent(args: argparse.Namespace, default: bool) -> bool:
+    """--agent/--no-agent > config 'agent' > per-client default."""
+    if args.agent is not None:
+        return args.agent
+    if _CONFIG.get("agent") is not None:
+        return bool(_CONFIG["agent"])
+    return default
+
+
+def resolve_tools(args: argparse.Namespace, agent_mode: bool, agent_tool: str = "code_execution") -> list:
+    """--tools '<json array>' > config 'tools' > the mode default
+    ([{"type": agent_tool}] in agent mode, else []).
+
+    Accepts a shorthand: a bare string entry is expanded to a {"type": <string>}
+    tool object, so `["web_search", "web_fetch"]` and
+    `[{"type": "web_search"}, {"type": "web_fetch"}]` are equivalent. Full tool
+    objects (dicts) pass through unchanged."""
+    if args.tools is not None:
+        tools = json.loads(args.tools)
+    elif _CONFIG.get("tools") is not None:
+        tools = _CONFIG["tools"]
+    else:
+        return [{"type": agent_tool}] if agent_mode else []
+    return [{"type": t} if isinstance(t, str) else t for t in tools]
+
+
+def resolve_tool_choice(args: argparse.Namespace) -> str:
+    """--tool-choice > config 'tool_choice' > 'auto'."""
+    return args.tool_choice or _CONFIG.get("tool_choice") or "auto"
 
 
 # --- color + terminal/logfile mirroring --------------------------------------

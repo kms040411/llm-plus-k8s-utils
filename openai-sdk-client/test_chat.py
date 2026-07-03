@@ -200,7 +200,7 @@ def main() -> int:
         description="Standard OpenAI Chat Completions test client (prunus dev server).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    common.add_common_args(p, default_agent=True)
+    common.add_common_args(p)
     p.add_argument(
         "--raw", action="store_true",
         help="dump the unparsed HTTP response (status, headers, raw SSE/JSON body)",
@@ -208,13 +208,10 @@ def main() -> int:
     args = p.parse_args()
 
     common.configure(args)
-    AGENT_MODE = args.agent
+    AGENT_MODE = common.resolve_agent(args, default=True)
     RAW = args.raw
-    TOOL_CHOICE = args.tool_choice
-    TOOLS = (
-        json.loads(args.tools) if args.tools is not None
-        else ([{"type": "code_execution"}] if AGENT_MODE else [])
-    )
+    TOOL_CHOICE = common.resolve_tool_choice(args)
+    TOOLS = common.resolve_tools(args, AGENT_MODE)
     client = common.make_client(AGENT_MODE)
 
     common.install_logfile("chat")
