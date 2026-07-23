@@ -26,6 +26,7 @@ import argparse
 import json
 import sys
 
+import httpx
 import openai
 
 import common
@@ -84,6 +85,64 @@ def respond(input_items: list, previous_response_id: str | None):
     except openai.APIConnectionError as e:
         sys.stdout.write(f"--- connection error: {e} ---\n")
         return None, [], False
+
+
+def compact(previous_response_id: str | None, input_items: list) -> dict | None:
+    """Compress the conversation via the server's /responses/compact, using the
+    SDK's low-level client.post (so base_url/auth/retries are reused). Store mode
+    sends previous_response_id (the server holds the history); no-store sends the
+    full local input array. Prints the server's raw response body and returns
+    the parsed Responses-style dict, or None when there is nothing to compact or
+    the request failed."""
+    # store=true is part of the request: the server persists the compacted
+    # response so store mode can chain from its id (and it rejects the call
+    # otherwise — "compaction requires store=true").
+    body: dict = {"model": common.MODEL, "store": True}
+    if STORE:
+        if not previous_response_id:
+            return None
+        body["previous_response_id"] = previous_response_id
+    else:
+        if not input_items:
+            return None
+        body["input"] = input_items
+
+    print("=== Request (client.post /responses/compact) ===")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    print("\n=== Response ===")
+    try:
+        resp = client.post("/responses/compact", cast_to=httpx.Response, body=body)
+    except openai.APIStatusError as e:
+        sys.stdout.write(f"--- HTTP {e.status_code} ---\n")
+        sys.stdout.write((getattr(e.response, "text", "") or "").strip() + "\n")
+        return None
+    except openai.APIConnectionError as e:
+        sys.stdout.write(f"--- connection error: {e} ---\n")
+        return None
+
+    # Dump the server's raw compact response verbatim. Server-side compaction
+    # keeps the summarized history behind the returned id, so this dump is the
+    # only place you can see what the compaction actually produced.
+    try:
+        data = resp.json()
+    except ValueError as e:  # json.JSONDecodeError — show the body as-is
+        sys.stdout.write((resp.text or "").rstrip() + "\n")
+        sys.stdout.write(f"--- compact response was not JSON: {e} ---\n")
+        return None
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return data
+
+
+def _compact_summary_text(data: dict) -> str:
+    """Pull any assistant message text out of a compact response's output[]."""
+    parts = []
+    for item in data.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for p in item.get("content") or []:
+            if p.get("type") in ("output_text", "text"):
+                parts.append(p.get("text", ""))
+    return "".join(parts).strip()
 
 
 def _consume_stream(stream):
@@ -270,12 +329,32 @@ def main() -> int:
                 state["input"].pop()
                 sys.stdout.write("\n[no reply — turn discarded]\n")
 
+    def do_compact() -> None:
+        # /compact: ask the server to compress the conversation, then continue
+        # from the compacted state (new previous_response_id, or reset input[]).
+        data = compact(state["prev"], state["input"])
+        if data is None:
+            sys.stdout.write("\n[compact: nothing to compact or request failed]\n")
+            return
+        if summary := _compact_summary_text(data):
+            sys.stdout.write(common.color(f"\n=== compacted summary ===\n{summary}\n", "1;36"))
+        if STORE:
+            new_id = data.get("id")
+            if new_id:
+                state["prev"] = new_id
+                sys.stdout.write(f"\n[compacted: previous_response_id -> {new_id}]\n")
+            else:
+                sys.stdout.write("\n[compact: response had no id; state unchanged]\n")
+        else:
+            state["input"] = data.get("output") or []
+            sys.stdout.write(f"\n[compacted: input reset to {len(state['input'])} items]\n")
+
     banner = (
-        "[interactive responses mode — /exit or Ctrl-D to quit]\n"
+        "[interactive responses mode — /compact to compress, /exit or Ctrl-D to quit]\n"
         f"[instructions: {len(SYSTEM_PROMPT)} chars; agent_mode: {AGENT_MODE}; "
         f"tools: {len(TOOLS)}; multi-turn: {mode}]"
     )
-    return common.repl(on_turn, banner)
+    return common.repl(on_turn, banner, commands={"/compact": do_compact})
 
 
 if __name__ == "__main__":

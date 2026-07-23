@@ -253,9 +253,14 @@ def chatbot_view(text: str) -> None:
 
 
 # --- REPL skeleton ------------------------------------------------------------
-def repl(on_turn, banner: str) -> int:
+def repl(on_turn, banner: str, commands: dict | None = None) -> int:
     """Drive an interactive loop. `on_turn(user_text)` handles one turn and owns
-    the conversation state (via closure). /exit, /quit, or EOF leaves."""
+    the conversation state (via closure). /exit, /quit, or EOF leaves.
+
+    `commands` optionally maps a slash command (e.g. "/compact") to a zero-arg
+    handler that mutates the same closed-over state; it's matched before on_turn
+    and does not count as a turn."""
+    commands = commands or {}
     sys.stdout.write(banner + "\n")
     turn = 0
     while True:
@@ -273,9 +278,13 @@ def repl(on_turn, banner: str) -> int:
         user_input = line.rstrip("\n")
         if not user_input.strip():
             continue
-        if user_input.strip().lower() in ("/exit", "/quit"):
+        cmd = user_input.strip().lower()
+        if cmd in ("/exit", "/quit"):
             sys.stdout.write("[exit]\n")
             return 0
+        if cmd in commands:
+            commands[cmd]()
+            continue
         turn += 1
         sys.stdout.write(f"\n=== turn {turn} — user ===\n{user_input}\n\n")
         on_turn(user_input)
