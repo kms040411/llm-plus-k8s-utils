@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 try:
     import readline  # enables Tab-completion + command history in the REPL
@@ -60,7 +62,8 @@ _SORT_KEYFN = {
 def _parse_list_flags(arg: str):
     """Pull leading --flags off the front; the remainder is the literal prefix.
     Flags must precede the prefix. Returns (opts, prefix)."""
-    opts = {"all": False, "sort": None, "desc": None}
+    opts = {"all": False, "sort": None, "desc": None,
+            "today": False, "since": None, "until": None, "grep": None}
     while True:
         head = arg.lstrip()
         if not head.startswith("-"):
@@ -84,6 +87,26 @@ def _parse_list_flags(arg: str):
             field_parts = rest.split(None, 1)
             opts["sort"] = field_parts[0].lower() if field_parts else ""
             arg = field_parts[1] if len(field_parts) > 1 else ""
+        elif tok == "--today":
+            opts["today"] = True
+            arg = rest
+        elif tok.startswith("--since=") or tok.startswith("--until="):
+            # Value from parts[0] (original case), not tok (lowercased) — harmless
+            # for dates but preserves case for the sibling --grep= form below.
+            key = "since" if tok.startswith("--since=") else "until"
+            opts[key] = parts[0].split("=", 1)[1]
+            arg = rest
+        elif tok in ("--since", "--until"):
+            vp = rest.split(None, 1)
+            opts[tok[2:]] = vp[0] if vp else None  # None (not "") when the value is missing
+            arg = vp[1] if len(vp) > 1 else ""
+        elif tok.startswith("--grep="):
+            opts["grep"] = parts[0].split("=", 1)[1]  # parts[0], not tok — keep the needle's case
+            arg = rest
+        elif tok == "--grep":
+            vp = rest.split(None, 1)
+            opts["grep"] = vp[0] if vp else None
+            arg = vp[1] if len(vp) > 1 else ""
         else:
             break  # unknown flag → treat it as the start of the (literal) prefix
     return opts, arg
@@ -110,18 +133,100 @@ def _sort_note(field, desc) -> str:
     return f", sorted by {field} {'↓desc' if desc else '↑asc'}" if field else ""
 
 
+# --- filtering ----------------------------------------------------------------
+_REL_RE = re.compile(r"^(\d+)([dhm])$")  # relative spec: d=days, h=hours, m=minutes
+
+
+def _parse_when(spec: str, *, is_until: bool):
+    """Parse a date-filter bound into a tz-aware instant. 'Nd'/'Nh'/'Nm' means N
+    days/hours/minutes before now (UTC-aware); 'YYYY-MM-DD' is midnight in the
+    display timezone (for --until it's the *next* midnight, so the named day is
+    included). Raises ValueError on anything unparseable."""
+    s = spec.strip()
+    m = _REL_RE.match(s.lower())
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        delta = {"d": timedelta(days=n), "h": timedelta(hours=n), "m": timedelta(minutes=n)}[unit]
+        return datetime.now(timezone.utc) - delta
+    d = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=common.display_tz())
+    return d + timedelta(days=1) if is_until else d
+
+
+def _build_filter(opts):
+    """Build a predicate over listed objects from the filter flags. Returns
+    (predicate, active): a half-open [lo, hi) window on LastModified — dates are
+    resolved in the display timezone, so --today matches the KST calendar day the
+    user sees — AND an optional case-sensitive substring match on the key. An
+    explicit --since/--until overrides the matching bound set by --today."""
+    tz = common.display_tz()
+    lo = hi = None
+    if opts.get("today"):
+        t0 = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        lo, hi = t0, t0 + timedelta(days=1)
+    for key, is_until in (("since", False), ("until", True)):
+        if opts.get(key):
+            try:
+                bound = _parse_when(opts[key], is_until=is_until)
+            except ValueError:
+                print(common.color(
+                    f"bad --{key} {opts[key]!r} (use YYYY-MM-DD or Nd/Nh/Nm); ignoring", "33"))
+                continue
+            if is_until:
+                hi = bound
+            else:
+                lo = bound
+    sub = opts.get("grep") or None
+    active = lo is not None or hi is not None or sub is not None
+
+    def pred(o):
+        if sub is not None and sub not in o["Key"]:
+            return False
+        if lo is None and hi is None:
+            return True
+        lm = o.get("LastModified")
+        if lm is None:
+            return False
+        if lm.tzinfo is None:  # defensive: a nonconforming server could return a naive time
+            lm = lm.replace(tzinfo=timezone.utc)
+        return (lo is None or lm >= lo) and (hi is None or lm < hi)
+
+    return pred, active
+
+
+def _filter_note(opts) -> str:
+    """Human-readable ', filtered (…)' tail for summary lines (mirrors _sort_note)."""
+    bits = []
+    if opts.get("today"):
+        bits.append("today")
+    if opts.get("since"):
+        bits.append(f"since {opts['since']}")
+    if opts.get("until"):
+        bits.append(f"until {opts['until']}")
+    if opts.get("grep"):
+        bits.append(f"~{opts['grep']!r}")
+    return f", filtered ({', '.join(bits)})" if bits else ""
+
+
 # --- listing ------------------------------------------------------------------
 def cmd_ls(st: State, arg: str) -> None:
     """Folder-style view of one level: sub-prefixes + keys directly under a prefix.
-      ls [--sort name|size|date] [--asc|--desc] [prefix]
-    Prefixes are always listed first (alphabetically); --sort orders the keys."""
+      ls [--sort name|size|date] [--asc|--desc]
+         [--today | --since S | --until S] [--grep SUB] [prefix]
+    Prefixes are always listed first (alphabetically); --sort orders the keys.
+    Date filters apply to keys only (prefixes have no timestamp); --grep also
+    narrows prefixes."""
     opts, prefix = _parse_list_flags(arg)
     field, desc = _resolve_sort(opts)
+    pred, filt = _build_filter(opts)
     resp = st.client.list_objects_v2(
         Bucket=st.bucket, Prefix=prefix, Delimiter="/", MaxKeys=st.max_keys
     )
     dirs = sorted(p["Prefix"] for p in resp.get("CommonPrefixes", []))
     objs = resp.get("Contents", [])
+    if filt:
+        objs = [o for o in objs if pred(o)]
+        if opts["grep"]:  # a name filter can narrow folders too; date bounds can't
+            dirs = [d for d in dirs if opts["grep"] in d]
     if field:
         objs = sorted(objs, key=_SORT_KEYFN[field], reverse=desc)
     for d in dirs:
@@ -129,60 +234,94 @@ def cmd_ls(st: State, arg: str) -> None:
     for o in objs:
         print(_fmt_row(o))
     if not dirs and not objs:
-        print("(empty)")
+        print("(empty)" + (" — nothing matches the filter" if filt else ""))
         return
-    print(common.color(f"— {len(dirs)} prefixes, {len(objs)} keys at this level{_sort_note(field, desc)}", "2"))
+    print(common.color(f"— {len(dirs)} prefixes, {len(objs)} keys at this level{_sort_note(field, desc)}{_filter_note(opts)}", "2"))
     if resp.get("IsTruncated"):
         print(common.color(f"  (truncated at {st.max_keys}; use 'list {prefix}' for the full flat listing)", "2"))
 
 
 def cmd_list(st: State, arg: str) -> None:
     """Flat recursive listing under a prefix.
-      list [--all] [--sort name|size|date] [--asc|--desc] [prefix]
+      list [--all] [--sort name|size|date] [--asc|--desc]
+           [--today | --since S | --until S] [--grep SUB] [prefix]
     Without --sort it streams (Ctrl-C shows the partial result); with --sort it
     buffers the (capped) result, sorts, then prints. Flags precede the prefix,
-    which is taken literally."""
+    which is taken literally. Filters run client-side over the scanned keys (S3
+    has no server-side date filter), so add --all to search the whole bucket."""
     opts, prefix = _parse_list_flags(arg)
     field, desc = _resolve_sort(opts)
+    pred, filt = _build_filter(opts)
     paginator = st.client.get_paginator("list_objects_v2")
     pg_cfg = {} if opts["all"] else {"MaxItems": st.max_keys}
     cap_note = "" if opts["all"] else f"  (capped at {st.max_keys}; add --all for everything)"
 
+    def _scan_note(scanned):
+        # If the filter only saw a capped window, say so rather than imply the
+        # whole bucket was searched.
+        if filt and not opts["all"] and scanned >= st.max_keys:
+            return f"  (filter applied to the first {scanned:,} scanned keys; add --all to search all)"
+        return cap_note
+
     if field is None:
         # Stream as we paginate — best for huge buckets; Ctrl-C leaves a partial.
-        count = 0
-        total = 0
+        matched = scanned = total = 0
+        # A filtered stream can go quiet for a while (few matches over many keys);
+        # show scan progress like `summary`, on the real terminal only (keeps the
+        # logfile clean), and clear it before printing a matched row.
+        show = filt and sys.__stdout__ is not None and sys.__stdout__.isatty()
+        progress = False
+        pages = 0
+
+        def _clear():
+            nonlocal progress
+            if progress:
+                sys.__stdout__.write("\r" + " " * 60 + "\r")
+                progress = False
+
         try:
             for page in paginator.paginate(Bucket=st.bucket, Prefix=prefix, PaginationConfig=pg_cfg):
+                pages += 1
                 for o in page.get("Contents", []):
+                    scanned += 1
+                    if filt and not pred(o):
+                        continue
+                    _clear()
                     print(_fmt_row(o))
-                    count += 1
+                    matched += 1
                     total += o["Size"]
+                if show and pages % 5 == 0:
+                    sys.__stdout__.write(f"\r  scanning… {scanned:,} scanned, {matched:,} matched    ")
+                    sys.__stdout__.flush()
+                    progress = True
         except KeyboardInterrupt:
-            print(common.color(f"\n[interrupted] shown {count:,} keys ({common.human_size(total)}) so far", "33"))
+            _clear()
+            print(common.color(f"\n[interrupted] shown {matched:,} keys ({common.human_size(total)}) so far", "33"))
             return
-        if count == 0:
-            print("(no keys)" + (f" under {prefix!r}" if prefix else ""))
+        _clear()
+        if matched == 0:
+            print("(no keys)" + (f" under {prefix!r}" if prefix else "") + (" match the filter" if filt else ""))
             return
-        print(common.color(f"— {count:,} keys, {common.human_size(total)}{cap_note}", "1;32"))
+        print(common.color(f"— {matched:,} keys{_filter_note(opts)}, {common.human_size(total)}{_scan_note(scanned)}", "1;32"))
         return
 
     # Sorted: buffer the (capped) result before printing — sorting needs it all.
-    objs = []
+    raw = []
     try:
         for page in paginator.paginate(Bucket=st.bucket, Prefix=prefix, PaginationConfig=pg_cfg):
-            objs.extend(page.get("Contents", []))
+            raw.extend(page.get("Contents", []))
     except KeyboardInterrupt:
-        print(common.color(f"\n[interrupted] collected {len(objs):,} keys; sorting those", "33"))
+        print(common.color(f"\n[interrupted] collected {len(raw):,} keys; sorting those", "33"))
+    objs = [o for o in raw if pred(o)] if filt else raw
     if not objs:
-        print("(no keys)" + (f" under {prefix!r}" if prefix else ""))
+        print("(no keys)" + (f" under {prefix!r}" if prefix else "") + (" match the filter" if filt else ""))
         return
     objs.sort(key=_SORT_KEYFN[field], reverse=desc)
     total = 0
     for o in objs:
         print(_fmt_row(o))
         total += o["Size"]
-    print(common.color(f"— {len(objs):,} keys, {common.human_size(total)}{_sort_note(field, desc)}{cap_note}", "1;32"))
+    print(common.color(f"— {len(objs):,} keys{_sort_note(field, desc)}{_filter_note(opts)}, {common.human_size(total)}{_scan_note(len(raw))}", "1;32"))
 
 
 def _print_top(top: dict, prefix: str = "") -> None:
@@ -245,8 +384,8 @@ def _try_owner(st: State, key: str) -> str:
 
 
 def cmd_stat(st: State, arg: str) -> None:
-    """Metadata for one key: size, last-modified (UTC), etag, content-type,
-    storage class, custom x-amz-meta-*, and best-effort owner."""
+    """Metadata for one key: size, last-modified (display timezone), etag,
+    content-type, storage class, custom x-amz-meta-*, and best-effort owner."""
     key = arg
     if not key:
         print("usage: stat <key>")
@@ -343,8 +482,8 @@ def cmd_buckets(st: State, arg: str) -> None:
 
 def cmd_help(st: State, arg: str) -> None:
     print(common.color("commands (read-only):", "1;36"))
-    print("""  ls   [--sort F] [--asc|--desc] [prefix]          folder view (prefixes + keys)
-  list [--all] [--sort F] [--asc|--desc] [prefix]  flat recursive listing
+    print("""  ls   [--sort F] [--asc|--desc] [FILTER] [prefix]          folder view (prefixes + keys)
+  list [--all] [--sort F] [--asc|--desc] [FILTER] [prefix]  flat recursive listing
   summary [prefix]      total object count + size + top-level breakdown (Ctrl-C = partial)
   stat <key>            metadata: size, last-modified, etag, type, owner (best-effort)
   cat <key>             print value (text); large → preview, binary → hex
@@ -355,6 +494,11 @@ def cmd_help(st: State, arg: str) -> None:
   /exit, /quit, Ctrl-D  quit  (Ctrl-C cancels the current listing/scan)
 
   sort field F: name | size | date   (default direction: name↑, size↓, date↓)
+  FILTER (ls/list): --today | --since S | --until S | --grep SUB
+    S = YYYY-MM-DD (that day) or Nd/Nh/Nm ago (d=days, h=hours, m=minutes); range is [start, end)
+    --grep = case-sensitive substring on the key; filters combine (AND) and run over scanned keys
+    (add --all so 'list' searches the whole bucket, not just the first page).
+  times use the display timezone — KST by default; set "display_timezone" in config.json.
   Tab completes commands, keys/prefixes, buckets and flags; ↑/↓ recalls history.""")
 
 
@@ -377,8 +521,9 @@ COMMANDS = {
 _NO_BUCKET_OK = {"use", "buckets", "help", "?"}
 # Commands whose argument is an S3 key/prefix (→ Tab-complete against the bucket).
 _KEY_COMMANDS = {"ls", "list", "summary", "stat", "head", "cat", "get", "save"}
-_LIST_FLAGS = ("--all", "--sort", "--asc", "--desc")
-_LS_FLAGS = ("--sort", "--asc", "--desc")
+_FILTER_FLAGS = ("--today", "--since", "--until", "--grep")
+_LIST_FLAGS = ("--all", "--sort", "--asc", "--desc") + _FILTER_FLAGS
+_LS_FLAGS = ("--sort", "--asc", "--desc") + _FILTER_FLAGS
 
 
 # --- Tab completion -----------------------------------------------------------
@@ -422,6 +567,10 @@ def complete(text: str, state: int):
             prev = parts[-1] if buf.endswith(" ") else (parts[-2] if len(parts) >= 2 else "")
             if prev.lower() in ("--sort", "-s"):
                 complete.matches = [f + " " for f in ("name", "size", "date") if f.startswith(text)]
+            elif prev.lower() in ("--since", "--until"):
+                complete.matches = [s for s in ("1d ", "7d ", "30d ", "24h ") if s.startswith(text)]
+            elif prev.lower() == "--grep":
+                complete.matches = []  # free-form substring — nothing sensible to complete
             elif text.startswith("-"):
                 flags = _LIST_FLAGS if cmd == "list" else (_LS_FLAGS if cmd == "ls" else ())
                 complete.matches = [f + " " for f in flags if f.startswith(text)]
@@ -510,6 +659,7 @@ def main() -> int:
     if args.verify_ssl is not None:
         cfg["verify_ssl"] = args.verify_ssl
 
+    common.set_display_timezone(cfg.get("display_timezone", "Asia/Seoul"))
     client = common.make_client(cfg)
     STATE = State(client, cfg.get("bucket") or "", cfg)
 

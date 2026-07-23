@@ -27,10 +27,10 @@ On start it verifies the bucket and prints a cheap overview (top-level "folders"
 
 | Command | Does |
 |---|---|
-| `ls [--sort F] [--asc\|--desc] [prefix]` | Folder view — sub-prefixes + keys directly at this level (`Delimiter="/"`). Prefixes list first; `--sort` orders the keys. |
-| `list [--all] [--sort F] [--asc\|--desc] [prefix]` | Flat recursive listing under `prefix`. Capped at `max_keys_default`; put `--all` first to remove the cap. |
+| `ls [--sort F] [--asc\|--desc] [--today\|--since S\|--until S] [--grep SUB] [prefix]` | Folder view — sub-prefixes + keys directly at this level (`Delimiter="/"`). Prefixes list first; `--sort` orders the keys; filters narrow them (see [Filtering](#filtering)). |
+| `list [--all] [--sort F] [--asc\|--desc] [--today\|--since S\|--until S] [--grep SUB] [prefix]` | Flat recursive listing under `prefix`. Capped at `max_keys_default`; put `--all` first to remove the cap. Filters run over the scanned keys (see [Filtering](#filtering)). |
 | `summary [prefix]` | Full object count + total size + top-level breakdown. `Ctrl-C` stops the scan and prints the partial total. |
-| `stat <key>` | Metadata: size, last-modified (UTC), etag, content-type, storage-class, custom `x-amz-meta-*`, and best-effort owner. |
+| `stat <key>` | Metadata: size, last-modified (KST), etag, content-type, storage-class, custom `x-amz-meta-*`, and best-effort owner. |
 | `cat <key>` | Print the value. Objects > 1 MiB are previewed; binary is shown as a hex dump. |
 | `save <key>` | Download to `./<basename>` (streamed to disk — safe for large files). |
 | `use [bucket]` | Switch the active bucket (no arg = show current). |
@@ -66,6 +66,39 @@ list --sort date orch/logs/       # newest first (date defaults to descending)
 ls --sort name orch/              # this level, keys A→Z
 ```
 
+### Times & timezone
+
+Timestamps (`ls`/`list` rows, `stat`, `buckets`) show in **KST** by default, labeled with the zone
+(e.g. `2026-07-02 22:12:27 KST`). Set `"display_timezone"` in `config.json` to any IANA name
+(`"UTC"`, `"America/New_York"`, …) to change it — the date filters below resolve "today"/dates in
+that same zone, so filtering always matches what you see.
+
+### Filtering
+
+`ls` and `list` accept date and name filters (flags precede the prefix, like `--sort`):
+
+- `--today` — keys last-modified **today** (in the display timezone).
+- `--since S` / `--until S` — a half-open `[start, end)` range on last-modified. `S` is an absolute
+  `YYYY-MM-DD` (midnight in the display timezone; `--until` includes the whole named day) or a
+  relative `Nd`/`Nh`/`Nm` (N **d**ays / **h**ours / **m**inutes ago).
+- `--grep SUB` — case-sensitive substring match on the key (also narrows folder names in `ls`).
+
+Filters combine with **AND**; an explicit `--since`/`--until` overrides the bound implied by
+`--today`. Date bounds apply to keys only (prefixes have no timestamp).
+
+```
+list --today orch/                 # modified today, under orch/
+list --since 2026-07-01 orch/      # on/after 2026-07-01
+list --until 7d --all              # older than 7 days ago, whole bucket
+ls --grep item: orch/              # keys/prefixes containing "item:"
+list --today --grep .json orch/    # today AND key contains ".json"
+```
+
+> **Caveat:** S3 has no server-side date filter, so filters run client-side over the keys actually
+> scanned. Without `--all`, `list` scans only the first `max_keys_default` keys (lexicographic order)
+> before filtering, so a late-sorting match can be missed — the summary line flags this and points you
+> to `--all`. `summary` always full-scans, so it stays the reliable home for whole-bucket questions.
+
 ## Configuration (`config.json`)
 
 Resolution order: `--config <path>` → `$S3_EXPLORER_CONFIG` → `./config.json`.
@@ -88,6 +121,7 @@ committed template.
 | `connect_timeout` / `read_timeout` | `10` / `60` | Fail fast on a dead endpoint. |
 | `max_attempts` | `3` | Bounded retries (standard mode). |
 | `max_keys_default` | `1000` | Page size / default listing cap. |
+| `display_timezone` | `Asia/Seoul` | IANA timezone for displayed times **and** date filters (`UTC`, `America/New_York`, …). |
 | `profile` | — | Optional named AWS profile (instead of inline keys). |
 
 ## Known S3-compatible quirks

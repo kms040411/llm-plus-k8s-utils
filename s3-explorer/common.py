@@ -19,7 +19,8 @@ import os
 import pathlib
 import re
 import sys
-from datetime import timezone
+from datetime import timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import boto3
 import botocore.exceptions as bexc
@@ -125,13 +126,43 @@ def human_size(n) -> str:
     return f"{n:.1f} PiB"
 
 
+# Display timezone for rendered S3 timestamps. Defaults to KST; override with the
+# `display_timezone` config key (any IANA name). Centralized here so every display
+# site (listing rows, `stat`, `buckets`) — and the date filters, which compute
+# "today" in this same zone — stays consistent.
+_KST_FALLBACK = timezone(timedelta(hours=9), "KST")  # only used if the system has no tz database at all
+try:
+    _DISPLAY_TZ = ZoneInfo("Asia/Seoul")
+except Exception:
+    _DISPLAY_TZ = _KST_FALLBACK
+
+
+def display_tz():
+    """The tzinfo currently used to render S3 timestamps (also used for date-filter math)."""
+    return _DISPLAY_TZ
+
+
+def set_display_timezone(name: str | None) -> None:
+    """Apply the configured display timezone (an IANA name like 'Asia/Seoul' or
+    'UTC'). Empty/None keeps the default (KST); an unknown name warns and keeps the
+    current zone rather than crashing."""
+    global _DISPLAY_TZ
+    if not name:
+        return
+    try:
+        _DISPLAY_TZ = ZoneInfo(name)
+    except (KeyError, ValueError):
+        sys.stderr.write(color(f"unknown display_timezone {name!r} — keeping current zone\n", "33"))
+
+
 def fmt_time(dt) -> str:
-    """S3 timestamps come back tz-aware in UTC. Render them explicitly as UTC so
-    nobody misreads a naive datetime as local time."""
+    """Render an S3 timestamp (tz-aware UTC) in the configured display timezone.
+    The %Z suffix labels the zone explicitly (e.g. 'KST'), so a time is never
+    misread as some other zone."""
     if dt is None:
         return "-"
     try:
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return dt.astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
     except Exception:
         return str(dt)
 

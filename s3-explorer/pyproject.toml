@@ -6,4 +6,5 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "boto3>=1.36",
+    "tzdata",  # bundled IANA tz database so display_timezone/ZoneInfo works even where the OS ships none
 ]
